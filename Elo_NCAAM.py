@@ -4,48 +4,39 @@ from numpy.linalg import inv
 from numpy import dot
 from math import isnan
 import datetime
+from scipy.stats import norm
 
-class Bayes_NCAAM_Model(object):
-    def __init__(self,teams,sigma=10.0,home_adv=3.0,forget_rate=0.0,scale_preds_by=1.0):
+class Elo_NCAAM_Model(object):
+    def __init__(self,teams,sigma=0.5,home_adv=3.0):
         self.teams=teams
         self.nbr_teams=len(teams)
         self.team_nbr={x:i for i,x in enumerate(teams)}
-        self.mu=np.zeros(self.nbr_teams)
-        self.A=np.identity(self.nbr_teams)/100
+        self.strengths=np.zeros(self.nbr_teams)
         self.sigma=sigma
-        self.scale_preds_by=scale_preds_by
         self.home_adv=home_adv
-        self.forget_rate=forget_rate
         self.history=pd.DataFrame(columns=['Date','Away','Home','Actual','Forecast','Spread'])
 
         
     
     def update(self,games):
-        m=self.nbr_teams
-        L=np.array([[0 for j in range(m)] for i in range(m)])
-        score_diffs=np.array([0 for i in range(m)])
         for row in games.itertuples():
             h=self.team_nbr[row.Home]
             a=self.team_nbr[row.Away]
-            d=row.Home_pts-row.Away_pts-self.home_adv*(1-row.Ntrl)
-            score_diffs[h]+=d
-            score_diffs[a]-=d
-            L[h,h]+=1
-            L[a,a]+=1
-            L[a,h]-=1
-            L[h,a]-=1
-            
-        v= dot(self.A,self.mu) + score_diffs/self.sigma**2
-        self.A = self.A + L/self.sigma**2
-        self.mu= dot(inv(self.A),v)
+            theta = self.strengths[h]- self.strengths[a] + self.home_adv*(1-row.Ntrl)
+            theta = min(3,max(-3,theta))
+            p=norm.cdf(theta)
+            q=1-p
+            r=self.sigma/np.sqrt(p*q)
+            home_won = row.Home_pts > row.Away_pts
+            delta= q*r if home_won else -p*r
+            self.strengths[h] += delta
+            self.strengths[a] -= delta
         
-    def forget(self):
-        self.A=self.A/(1+self.forget_rate)
     
     def predict(self,games):
-        games['HomeStr']=games.apply(lambda row: self.mu[self.team_nbr[row.Home]]+self.home_adv*(1-row.Ntrl), axis=1)
-        games['AwayStr']=games.apply(lambda row: self.mu[self.team_nbr[row.Away]], axis=1)
-        return (games.HomeStr-games.AwayStr).values*self.scale_preds_by
+        games['HomeStr']=games.apply(lambda row: self.strengths[self.team_nbr[row.Home]]+self.home_adv*(1-row.Ntrl), axis=1)
+        games['AwayStr']=games.apply(lambda row: self.strengths[self.team_nbr[row.Away]], axis=1)
+        return 10*(games.HomeStr-games.AwayStr).values
     
     def RunGames(self,games,add_to_hist=True):
         if len(games)==0:
@@ -58,7 +49,7 @@ class Bayes_NCAAM_Model(object):
         self.update(games)
 
     def rankings(self):
-        df=pd.DataFrame({'Team':self.teams,'Strengths':self.mu})
+        df=pd.DataFrame({'Team':self.teams,'Strengths':self.strengths})
         df=df.sort_values(by='Strengths',ascending=False)
         df['Rank']=[i for i in range(1,len(self.teams)+1)]
         df=df.set_index('Rank')
